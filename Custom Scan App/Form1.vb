@@ -1,13 +1,15 @@
-﻿Imports iTextSharp.text
+Imports iTextSharp.text
 Imports iTextSharp.text.pdf
 Imports NTwain
 Imports NTwain.Data
 Imports System.Drawing
+Imports System.Collections.Generic
 Imports System.IO
 Imports System.Net.WebSockets
 Imports System.Text
 Imports System.Threading
 Imports System.Windows.Forms
+Imports Microsoft.Win32
 Imports Image = System.Drawing.Image
 
 Public Class Form1
@@ -16,6 +18,7 @@ Public Class Form1
     Private WithEvents btnSend As New Button ' Button for saving to PDF and sending to WebSocket
     'Private WithEvents btnScan As New Button ' Button for scanning
     Private WithEvents pictureBox As New PictureBox ' PictureBox for image preview
+    Private previewCard As Panel
     Private WithEvents btnZoomIn As New Button ' Button for zooming in
     Private WithEvents btnZoomOut As New Button ' Button for zooming out
     Private WithEvents btnNext As New Button ' Button for next image
@@ -23,8 +26,13 @@ Public Class Form1
     Private WithEvents progressBar As New ProgressBar ' Loading indicator
     Private WithEvents txtSavePath As New TextBox ' TextBox for custom save path
     Private WithEvents btnSetPath As New Button ' Button to apply custom path
+    Private WithEvents lblImageInfo As New Label ' Image index display
     Private zoomLevel As Single = 1.0F ' Current zoom level for PictureBox
     Private savePath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop) ' Default to Downloads
+    Private loaNo As String = ""
+    Private transactionNo As String = ""
+    Private batchNo As String = ""
+    Private userToken As String = ""
 
     ' Helper function to resize icons
     Private Function ResizeImage(sourceImage As Image, targetSize As Size) As Image
@@ -39,12 +47,18 @@ Public Class Form1
         Return resizedImage
     End Function
 
-    Private Async Function SendToWebSocket(base64Image As String) As Task
+    Private Async Function SendToWebSocket(message As String) As Task
         Try
-            Dim wsUri As New Uri("ws://localhost:8080") ' Placeholder WebSocket URL
+            Dim baseUri As String = "wss://yourwebsocketserver.com/scan_endpoint"
+            If String.IsNullOrEmpty(userToken) Then
+                baseUri = baseUri
+            Else
+                baseUri = baseUri & "?token=" & Uri.EscapeDataString(userToken)
+            End If
+            Dim wsUri As New Uri(baseUri)
             Using ws As New ClientWebSocket()
                 Await ws.ConnectAsync(wsUri, CancellationToken.None)
-                Dim buffer As Byte() = Encoding.UTF8.GetBytes(base64Image)
+                Dim buffer As Byte() = Encoding.UTF8.GetBytes(message)
                 Await ws.SendAsync(New ArraySegment(Of Byte)(buffer), WebSocketMessageType.Text, True, CancellationToken.None)
                 Await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", CancellationToken.None)
             End Using
@@ -55,148 +69,326 @@ Public Class Form1
     End Function
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        EnsureCustomProtocolRegistered()
+        ShowLaunchParameters()
         ' Set form size
-        Me.Size = New Size(800, 600)
-        Me.MinimumSize = New Size(600, 400) ' Ensure form is resizable but not too small
+        Me.Size = New Size(900, 650)
+        Me.MinimumSize = New Size(700, 500) ' Ensure form is resizable but not too small
+        Me.BackColor = Color.FromArgb(243, 244, 246)
+        Me.Font = New System.Drawing.Font("Segoe UI", 9.5F, System.Drawing.FontStyle.Regular)
 
-        ' Setup PictureBox (responsive to form size)
-        pictureBox.Size = New Size(CInt(Me.ClientSize.Width * 0.7), CInt(Me.ClientSize.Height * 0.7))
-        pictureBox.Location = New Point(10, 10)
+        Dim mainLayout As New TableLayoutPanel()
+        mainLayout.Dock = DockStyle.Fill
+        mainLayout.Padding = New Padding(16)
+        mainLayout.ColumnCount = 1
+        mainLayout.RowCount = 3
+        mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+        mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 70.0F))
+        mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 30.0F))
+        Me.Controls.Add(mainLayout)
+
+        Dim headerPanel As New FlowLayoutPanel()
+        headerPanel.FlowDirection = FlowDirection.TopDown
+        headerPanel.WrapContents = False
+        headerPanel.AutoSize = True
+        headerPanel.Dock = DockStyle.Top
+
+        Dim lblTitle As New Label()
+        lblTitle.Text = "Custom Scan App"
+        lblTitle.Font = New System.Drawing.Font("Segoe UI Semibold", 16.0F, System.Drawing.FontStyle.Bold)
+        lblTitle.ForeColor = Color.FromArgb(17, 24, 39)
+        lblTitle.AutoSize = True
+
+        Dim lblSubtitle As New Label()
+        lblSubtitle.Text = "Scan documents and send as PDF"
+        lblSubtitle.Font = New System.Drawing.Font("Segoe UI", 10.0F, System.Drawing.FontStyle.Regular)
+        lblSubtitle.ForeColor = Color.FromArgb(107, 114, 128)
+        lblSubtitle.AutoSize = True
+
+        headerPanel.Controls.Add(lblTitle)
+        headerPanel.Controls.Add(lblSubtitle)
+        mainLayout.Controls.Add(headerPanel, 0, 0)
+
+        previewCard = New Panel()
+        previewCard.Dock = DockStyle.Fill
+        previewCard.BackColor = Color.White
+        previewCard.Padding = New Padding(12)
+        previewCard.BorderStyle = BorderStyle.FixedSingle
+        previewCard.AutoScroll = True
+
+        pictureBox.Dock = DockStyle.None
         pictureBox.SizeMode = PictureBoxSizeMode.Zoom
-        pictureBox.BorderStyle = BorderStyle.FixedSingle
-        Me.Controls.Add(pictureBox)
+        pictureBox.BorderStyle = BorderStyle.None
+        pictureBox.BackColor = Color.FromArgb(249, 250, 251)
+        pictureBox.Location = New Point(0, 0)
+        pictureBox.Size = New Size(600, 400)
+        previewCard.Controls.Add(pictureBox)
+        AddHandler previewCard.SizeChanged, Sub()
+                                                UpdatePreviewSize()
+                                            End Sub
+        mainLayout.Controls.Add(previewCard, 0, 1)
 
         ' Setup Scan button
         btnScan.Text = "Scan"
-        btnScan.Size = New Size(100, 30)
-        btnScan.Location = New Point(10, Me.ClientSize.Height - 120)
+        ApplyPrimaryButtonStyle(btnScan, Color.FromArgb(79, 70, 229), 120)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "scan.png"))
-            btnScan.Image = ResizeImage(icon, New Size(24, 24))
+            btnScan.Image = ResizeImage(icon, New Size(20, 20))
             icon.Dispose()
-            btnScan.ImageAlign = ContentAlignment.MiddleLeft
-            btnScan.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading scan icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnScan)
 
         ' Setup Send button
         btnSend.Text = "Save as PDF and Send"
-        btnSend.Size = New Size(150, 30)
-        btnSend.Location = New Point(120, Me.ClientSize.Height - 120)
+        ApplyPrimaryButtonStyle(btnSend, Color.FromArgb(16, 185, 129), 190)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "save.png"))
-            btnSend.Image = ResizeImage(icon, New Size(24, 24))
+            btnSend.Image = ResizeImage(icon, New Size(20, 20))
             icon.Dispose()
-            btnSend.ImageAlign = ContentAlignment.MiddleLeft
-            btnSend.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading save icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnSend)
 
         ' Setup Zoom In button
         btnZoomIn.Text = "Zoom In"
-        btnZoomIn.Size = New Size(100, 30)
-        btnZoomIn.Location = New Point(280, Me.ClientSize.Height - 120)
+        ApplySecondaryButtonStyle(btnZoomIn, 120)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "zoom_in.png"))
-            btnZoomIn.Image = ResizeImage(icon, New Size(24, 24))
+            btnZoomIn.Image = ResizeImage(icon, New Size(18, 18))
             icon.Dispose()
-            btnZoomIn.ImageAlign = ContentAlignment.MiddleLeft
-            btnZoomIn.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading zoom in icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnZoomIn)
 
         ' Setup Zoom Out button
         btnZoomOut.Text = "Zoom Out"
-        btnZoomOut.Size = New Size(100, 30)
-        btnZoomOut.Location = New Point(390, Me.ClientSize.Height - 120)
+        ApplySecondaryButtonStyle(btnZoomOut, 120)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "zoom_out.png"))
-            btnZoomOut.Image = ResizeImage(icon, New Size(24, 24))
+            btnZoomOut.Image = ResizeImage(icon, New Size(18, 18))
             icon.Dispose()
-            btnZoomOut.ImageAlign = ContentAlignment.MiddleLeft
-            btnZoomOut.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading zoom out icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnZoomOut)
 
         ' Setup Previous button
         btnPrev.Text = "Previous"
-        btnPrev.Size = New Size(100, 30)
-        btnPrev.Location = New Point(10, Me.ClientSize.Height - 80)
+        ApplySecondaryButtonStyle(btnPrev, 120)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "previous.png"))
-            btnPrev.Image = ResizeImage(icon, New Size(24, 24))
+            btnPrev.Image = ResizeImage(icon, New Size(18, 18))
             icon.Dispose()
-            btnPrev.ImageAlign = ContentAlignment.MiddleLeft
-            btnPrev.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading previous icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnPrev)
 
         ' Setup Next button
         btnNext.Text = "Next"
-        btnNext.Size = New Size(100, 30)
-        btnNext.Location = New Point(120, Me.ClientSize.Height - 80)
+        ApplySecondaryButtonStyle(btnNext, 120)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "next.png"))
-            btnNext.Image = ResizeImage(icon, New Size(24, 24))
+            btnNext.Image = ResizeImage(icon, New Size(18, 18))
             icon.Dispose()
-            btnNext.ImageAlign = ContentAlignment.MiddleLeft
-            btnNext.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading next icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnNext)
 
         ' Setup Save Path TextBox
-        txtSavePath.Size = New Size(200, 30)
-        txtSavePath.Location = New Point(230, Me.ClientSize.Height - 80)
+        txtSavePath.Size = New Size(220, 30)
         txtSavePath.Text = savePath ' Default to Downloads
-        Me.Controls.Add(txtSavePath)
 
         ' Setup Set Path button
         btnSetPath.Text = "Set Path"
-        btnSetPath.Size = New Size(100, 30)
-        btnSetPath.Location = New Point(440, Me.ClientSize.Height - 80)
+        ApplySecondaryButtonStyle(btnSetPath, 120)
         Try
             Dim icon As Image = Image.FromFile(Path.Combine(Application.StartupPath, "Icons", "folder.png"))
-            btnSetPath.Image = ResizeImage(icon, New Size(24, 24))
+            btnSetPath.Image = ResizeImage(icon, New Size(18, 18))
             icon.Dispose()
-            btnSetPath.ImageAlign = ContentAlignment.MiddleLeft
-            btnSetPath.TextAlign = ContentAlignment.MiddleRight
         Catch ex As Exception
             Me.Invoke(Sub() MessageBox.Show("Error loading folder icon: " & ex.Message))
         End Try
-        Me.Controls.Add(btnSetPath)
 
         ' Setup ProgressBar
-        progressBar.Size = New Size(200, 30)
-        progressBar.Location = New Point(230, Me.ClientSize.Height - 40)
+        progressBar.Size = New Size(220, 10)
         progressBar.Style = ProgressBarStyle.Marquee
         progressBar.Visible = False ' Hidden by default
-        Me.Controls.Add(progressBar)
 
-        ' Handle form resize to make PictureBox and controls responsive
-        AddHandler Me.Resize, Sub()
-                                  pictureBox.Size = New Size(CInt(Me.ClientSize.Width * 0.7), CInt(Me.ClientSize.Height * 0.7))
-                                  btnScan.Location = New Point(10, Me.ClientSize.Height - 120)
-                                  btnSend.Location = New Point(120, Me.ClientSize.Height - 120)
-                                  btnZoomIn.Location = New Point(280, Me.ClientSize.Height - 120)
-                                  btnZoomOut.Location = New Point(390, Me.ClientSize.Height - 120)
-                                  btnPrev.Location = New Point(10, Me.ClientSize.Height - 80)
-                                  btnNext.Location = New Point(120, Me.ClientSize.Height - 80)
-                                  txtSavePath.Location = New Point(230, Me.ClientSize.Height - 80)
-                                  btnSetPath.Location = New Point(440, Me.ClientSize.Height - 80)
-                                  progressBar.Location = New Point(230, Me.ClientSize.Height - 40)
-                              End Sub
+        lblImageInfo.Text = "No scanned images"
+        lblImageInfo.AutoSize = True
+        lblImageInfo.ForeColor = Color.FromArgb(107, 114, 128)
+
+        Dim controlsCard As New Panel()
+        controlsCard.Dock = DockStyle.Fill
+        controlsCard.BackColor = Color.White
+        controlsCard.Padding = New Padding(12)
+        controlsCard.BorderStyle = BorderStyle.FixedSingle
+
+        Dim controlsLayout As New TableLayoutPanel()
+        controlsLayout.Dock = DockStyle.Fill
+        controlsLayout.ColumnCount = 1
+        controlsLayout.RowCount = 3
+        controlsLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+        controlsLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+
+        Dim actionRow As New FlowLayoutPanel()
+        actionRow.Dock = DockStyle.Top
+        actionRow.AutoSize = True
+        actionRow.WrapContents = True
+        actionRow.Controls.Add(btnScan)
+        actionRow.Controls.Add(btnSend)
+        actionRow.Controls.Add(btnZoomIn)
+        actionRow.Controls.Add(btnZoomOut)
+        actionRow.Controls.Add(btnPrev)
+        actionRow.Controls.Add(btnNext)
+        actionRow.Controls.Add(lblImageInfo)
+
+        Dim pathRow As New FlowLayoutPanel()
+        pathRow.Dock = DockStyle.Top
+        pathRow.AutoSize = True
+        pathRow.WrapContents = True
+        Dim lblPath As New Label()
+        lblPath.Text = "Save Path:"
+        lblPath.AutoSize = True
+        lblPath.ForeColor = Color.FromArgb(75, 85, 99)
+        lblPath.Margin = New Padding(0, 8, 8, 0)
+        pathRow.Controls.Add(lblPath)
+        pathRow.Controls.Add(txtSavePath)
+        pathRow.Controls.Add(btnSetPath)
+        pathRow.Controls.Add(progressBar)
+
+        controlsLayout.Controls.Add(actionRow, 0, 0)
+        controlsLayout.Controls.Add(pathRow, 0, 1)
+        controlsCard.Controls.Add(controlsLayout)
+        mainLayout.Controls.Add(controlsCard, 0, 2)
+        UpdatePreviewSize()
+    End Sub
+
+    Private Sub ApplyPrimaryButtonStyle(button As Button, backColor As Color, width As Integer)
+        button.BackColor = backColor
+        button.ForeColor = Color.White
+        button.FlatStyle = FlatStyle.Flat
+        button.FlatAppearance.BorderSize = 0
+        button.Width = width
+        button.Height = 36
+        button.Font = New System.Drawing.Font("Segoe UI Semibold", 9.5F, System.Drawing.FontStyle.Bold)
+        button.TextAlign = ContentAlignment.MiddleCenter
+        button.ImageAlign = ContentAlignment.MiddleLeft
+        button.Padding = New Padding(8, 0, 8, 0)
+        button.Margin = New Padding(0, 0, 12, 12)
+    End Sub
+
+    Private Sub ApplySecondaryButtonStyle(button As Button, width As Integer)
+        button.BackColor = Color.FromArgb(229, 231, 235)
+        button.ForeColor = Color.FromArgb(31, 41, 55)
+        button.FlatStyle = FlatStyle.Flat
+        button.FlatAppearance.BorderSize = 0
+        button.Width = width
+        button.Height = 34
+        button.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular)
+        button.TextAlign = ContentAlignment.MiddleCenter
+        button.ImageAlign = ContentAlignment.MiddleLeft
+        button.Padding = New Padding(8, 0, 8, 0)
+        button.Margin = New Padding(0, 0, 12, 12)
+    End Sub
+
+    Private Sub UpdateImageInfo()
+        If scannedImages.Count = 0 OrElse currentImageIndex < 0 Then
+            lblImageInfo.Text = "No scanned images"
+        Else
+            lblImageInfo.Text = $"Image {currentImageIndex + 1} of {scannedImages.Count}"
+        End If
+    End Sub
+
+    Private Sub UpdatePreviewSize()
+        If previewCard Is Nothing Then
+            Return
+        End If
+        Dim width As Integer = Math.Max(1, CInt(previewCard.ClientSize.Width * zoomLevel))
+        Dim height As Integer = Math.Max(1, CInt(previewCard.ClientSize.Height * zoomLevel))
+        pictureBox.Size = New Size(width, height)
+    End Sub
+
+    Private Sub ShowLaunchParameters()
+        Try
+            Dim args = Environment.GetCommandLineArgs()
+            Dim urlArg As String = args.FirstOrDefault(Function(a) a.StartsWith("customscan://", StringComparison.OrdinalIgnoreCase))
+            If String.IsNullOrEmpty(urlArg) Then
+                Return
+            End If
+
+            Dim uri As New Uri(urlArg)
+            Dim parameters = ParseQueryString(uri.Query)
+            If parameters.Count = 0 Then
+                Return
+            End If
+
+            loaNo = GetParam(parameters, "loa_no")
+            transactionNo = GetParam(parameters, "transaction_no")
+            batchNo = GetParam(parameters, "batch_no")
+            userToken = GetParam(parameters, "token")
+
+            Dim message As String =
+                "loa_no: " & loaNo & Environment.NewLine &
+                "transaction_no: " & transactionNo & Environment.NewLine &
+                "batch_no: " & batchNo & Environment.NewLine &
+                "token: " & userToken
+            MessageBox.Show(message, "Custom Scan App Parameters")
+        Catch ex As Exception
+            MessageBox.Show("Failed to read launch parameters: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Function ParseQueryString(query As String) As Dictionary(Of String, String)
+        Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        If String.IsNullOrWhiteSpace(query) Then
+            Return result
+        End If
+        Dim trimmed = query.TrimStart("?"c)
+        For Each pair In trimmed.Split("&"c)
+            If String.IsNullOrWhiteSpace(pair) Then
+                Continue For
+            End If
+            Dim parts = pair.Split("="c, 2)
+            Dim key = Uri.UnescapeDataString(parts(0))
+            Dim value As String = ""
+            If parts.Length > 1 Then
+                value = Uri.UnescapeDataString(parts(1))
+            End If
+            If Not result.ContainsKey(key) Then
+                result(key) = value
+            End If
+        Next
+        Return result
+    End Function
+
+    Private Function GetParam(parameters As Dictionary(Of String, String), key As String) As String
+        Dim value As String = ""
+        If parameters.TryGetValue(key, value) Then
+            Return value
+        End If
+        Return ""
+    End Function
+
+    Private Sub EnsureCustomProtocolRegistered()
+        Try
+            Dim exePath As String = Application.ExecutablePath
+            Dim commandValue As String = $"""{exePath}"" ""%1"""
+            Using customKey As RegistryKey = Registry.CurrentUser.CreateSubKey("Software\Classes\customscan")
+                If customKey.GetValue("URL Protocol") Is Nothing Then
+                    customKey.SetValue("", "URL:Custom Scan Protocol")
+                    customKey.SetValue("URL Protocol", "")
+                End If
+            End Using
+            Using commandKey As RegistryKey = Registry.CurrentUser.CreateSubKey("Software\Classes\customscan\shell\open\command")
+                Dim existing As Object = commandKey.GetValue("")
+                If existing Is Nothing OrElse Not String.Equals(existing.ToString(), commandValue, StringComparison.OrdinalIgnoreCase) Then
+                    commandKey.SetValue("", commandValue)
+                End If
+            End Using
+        Catch ex As Exception
+            MessageBox.Show("Failed to register customscan protocol: " & ex.Message)
+        End Try
     End Sub
 
     Private Sub btnSetPath_Click(sender As Object, e As EventArgs) Handles btnSetPath.Click
@@ -217,7 +409,7 @@ Public Class Form1
         End Try
     End Sub
 
-    Private Async Sub btnScan_Click(sender As Object, e As EventArgs) Handles btnScan.Click
+    Private Sub btnScan_Click(sender As Object, e As EventArgs) Handles btnScan.Click
         Try
             ' Show loading indicator
             Me.Invoke(Sub()
@@ -293,6 +485,7 @@ Public Class Form1
                                                                  If newImage IsNot Nothing Then
                                                                      Me.Invoke(Sub()
                                                                                    pictureBox.Image = scannedImages(currentImageIndex) ' Display in PictureBox
+                                                                                   UpdateImageInfo()
                                                                                    MessageBox.Show("Image successfully captured and displayed.")
                                                                                End Sub)
                                                                  Else
@@ -347,10 +540,12 @@ Public Class Form1
 
                 ' Save each image as a separate PDF
                 Dim savedFiles As New List(Of String)()
+                Dim filesPayload As New List(Of Dictionary(Of String, String))()
                 For i As Integer = 0 To scannedImages.Count - 1
+                    Dim currentIndex = i + 1
                     Dim img = scannedImages(i)
                     If img.Width > 0 AndAlso img.Height > 0 Then
-                        Dim filePath As String = Path.Combine(savePath, $"scan_pdf{i + 1}.pdf")
+                        Dim filePath As String = Path.Combine(savePath, $"scan_pdf{currentIndex}.pdf")
                         Using document As New Document(PageSize.A4, 10, 10, 10, 10)
                             Using stream As New FileStream(filePath, FileMode.Create)
                                 PdfWriter.GetInstance(document, stream)
@@ -364,17 +559,35 @@ Public Class Form1
                         ' Verify PDF file exists and has content
                         If File.Exists(filePath) AndAlso New FileInfo(filePath).Length > 0 Then
                             savedFiles.Add(filePath)
-                            ' Convert PDF to base64 and send to WebSocket
                             Dim pdfBytes As Byte() = File.ReadAllBytes(filePath)
                             Dim base64Pdf As String = Convert.ToBase64String(pdfBytes)
-                            Await SendToWebSocket(base64Pdf)
+                            filesPayload.Add(New Dictionary(Of String, String) From {
+                                {"file_name", Path.GetFileName(filePath)},
+                                {"content_type", "application/pdf"},
+                                {"data_base64", base64Pdf}
+                            })
                         Else
-                            Me.Invoke(Sub() MessageBox.Show($"PDF {filePath} is empty or was not created correctly."))
+                            Dim missingFilePath = filePath
+                            Me.Invoke(Sub() MessageBox.Show($"PDF {missingFilePath} is empty or was not created correctly."))
                         End If
                     Else
-                        Me.Invoke(Sub() MessageBox.Show($"Skipping invalid image {i + 1} with zero dimensions."))
+                        Dim badIndex = currentIndex
+                        Me.Invoke(Sub() MessageBox.Show($"Skipping invalid image {badIndex} with zero dimensions."))
                     End If
                 Next
+
+                If filesPayload.Count > 0 Then
+                    Dim payload As New Dictionary(Of String, Object) From {
+                        {"type", "scan_upload"},
+                        {"loa_no", loaNo},
+                        {"transaction_no", transactionNo},
+                        {"batch_no", batchNo},
+                        {"token", userToken},
+                        {"files", filesPayload}
+                    }
+                    Dim jsonPayload As String = System.Text.Json.JsonSerializer.Serialize(payload)
+                    Await SendToWebSocket(jsonPayload)
+                End If
 
                 ' Hide loading indicator and show result
                 Me.Invoke(Sub()
@@ -404,19 +617,17 @@ Public Class Form1
 
     Private Sub btnZoomIn_Click(sender As Object, e As EventArgs) Handles btnZoomIn.Click
         If pictureBox.Image IsNot Nothing Then
-            zoomLevel += 0.1F
-            pictureBox.SizeMode = PictureBoxSizeMode.StretchImage
-            pictureBox.Width = CInt(pictureBox.Width * 1.1)
-            pictureBox.Height = CInt(pictureBox.Height * 1.1)
+            zoomLevel = Math.Min(2.5F, zoomLevel + 0.1F)
+            pictureBox.SizeMode = PictureBoxSizeMode.Zoom
+            UpdatePreviewSize()
         End If
     End Sub
 
     Private Sub btnZoomOut_Click(sender As Object, e As EventArgs) Handles btnZoomOut.Click
         If pictureBox.Image IsNot Nothing AndAlso zoomLevel > 0.2F Then
-            zoomLevel -= 0.1F
-            pictureBox.SizeMode = PictureBoxSizeMode.StretchImage
-            pictureBox.Width = CInt(pictureBox.Width / 1.1)
-            pictureBox.Height = CInt(pictureBox.Height / 1.1)
+            zoomLevel = Math.Max(0.4F, zoomLevel - 0.1F)
+            pictureBox.SizeMode = PictureBoxSizeMode.Zoom
+            UpdatePreviewSize()
         End If
     End Sub
 
@@ -426,8 +637,8 @@ Public Class Form1
             pictureBox.Image = scannedImages(currentImageIndex)
             zoomLevel = 1.0F
             pictureBox.SizeMode = PictureBoxSizeMode.Zoom
-            pictureBox.Width = CInt(Me.ClientSize.Width * 0.7)
-            pictureBox.Height = CInt(Me.ClientSize.Height * 0.7)
+            UpdatePreviewSize()
+            UpdateImageInfo()
         End If
     End Sub
 
@@ -437,8 +648,8 @@ Public Class Form1
             pictureBox.Image = scannedImages(currentImageIndex)
             zoomLevel = 1.0F
             pictureBox.SizeMode = PictureBoxSizeMode.Zoom
-            pictureBox.Width = CInt(Me.ClientSize.Width * 0.7)
-            pictureBox.Height = CInt(Me.ClientSize.Height * 0.7)
+            UpdatePreviewSize()
+            UpdateImageInfo()
         End If
     End Sub
 End Class
